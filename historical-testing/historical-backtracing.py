@@ -8,94 +8,120 @@ import ta
 from typing import List, Dict, Optional
 
 def download_data(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
-    data = yf.download(ticker, period=period, interval=interval)
+    data = yf.download(ticker, period=period, interval=interval, group_by="column")
+    
+    # Flatten MultiIndex if present
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+    
     return data.dropna()
 
 def compute_indicators(data: pd.DataFrame) -> pd.DataFrame:
-    # Bollinger Bands
-    bb = ta.volatility.BollingerBands(close=data["Close"].squeeze(), window=20, window_dev=2)
-    data["bb_upper"] = bb.bollinger_hband().squeeze()
-    data["bb_lower"] = bb.bollinger_lband().squeeze()
+    bb = ta.volatility.BollingerBands(close=data["Close"], window=20, window_dev=2)
+    data["bb_upper"] = bb.bollinger_hband()
+    data["bb_lower"] = bb.bollinger_lband()
 
-    # Stochastic Oscillator
-    high = data["High"].squeeze()
-    low = data["Low"].squeeze()
-    close = data["Close"].squeeze()
+    stoch = ta.momentum.StochasticOscillator(
+        high=data["High"], low=data["Low"], close=data["Close"], window=14, smooth_window=3
+    )
+    data["stoch_k"] = stoch.stoch()
+    data["stoch_d"] = stoch.stoch_signal()
 
-    stoch = ta.momentum.StochasticOscillator(high=high, low=low, close=close, window=14, smooth_window=3)
-    data["stoch_k"] = stoch.stoch().squeeze()
-    data["stoch_d"] = stoch.stoch_signal().squeeze()
+    data["vol_avg30"] = data["Volume"].rolling(window=30).mean()
+    
+    rsi = ta.momentum.RSIIndicator(close=data["Close"], window=14)
+    data["rsi"] = rsi.rsi()
 
-    # Volume average
-    data["vol_avg30"] = data["Volume"].rolling(window=30).mean().squeeze()
+    # Calculate Z-score of Close price over rolling 20-day window
+    data["close_mean20"] = data["Close"].rolling(window=20).mean()
+    data["close_std20"] = data["Close"].rolling(window=20).std()
+    data["z_score"] = (data["Close"] - data["close_mean20"]) / data["close_std20"]
+    
 
-    # RSI
-    rsi = ta.momentum.RSIIndicator(close=close, window=14)
-    data["rsi"] = rsi.rsi().squeeze()
+    # Clean up NaN rows created by rolling calculations
+    data = data.dropna(subset=["z_score", "stoch_k", "rsi"])
 
     return data
 
+def generate_signals(data: pd.DataFrame, score_threshold_quantile: float = 0.80) -> pd.DataFrame:
+    # Composite score components (negative z-score means price is below recent mean)
+    z_score_neg = -data["z_score"]  # flip sign so that strong negative = high positive score
+    stoch_oversold = (20 - data["stoch_k"]).clip(lower=0)  # only positive if stoch_k < 20
+    rsi_oversold = (45 - data["rsi"]).clip(lower=0)  # only positive if rsi < 45
 
+    # Normalize components by max to scale between 0 and 1 (avoid divide by zero)
+    z_norm = z_score_neg / (z_score_neg.max() if z_score_neg.max() != 0 else 1)
+    stoch_norm = stoch_oversold / (stoch_oversold.max() if stoch_oversold.max() != 0 else 1)
+    rsi_norm = rsi_oversold / (rsi_oversold.max() if rsi_oversold.max() != 0 else 1)
 
-def generate_signals(data: pd.DataFrame) -> pd.DataFrame:
-    close = data["Close"].squeeze()
-    bb_lower = data["bb_lower"].squeeze()
-    bb_upper = data["bb_upper"].squeeze()
-    stoch_k = data["stoch_k"].squeeze()
-    stoch_d = data["stoch_d"].squeeze()
-    rsi = data["rsi"].squeeze()
-    vol = data["Volume"].squeeze()
-    vol_avg30 = data["vol_avg30"].squeeze()
+    # Composite score (equal weights)
+    data["composite_score"] = z_norm + stoch_norm + rsi_norm
 
-    # Buy Signal:
-    # - Close is near the lower BB (within 2%)
-    # - Stochastic crossover below 20 (bullish reversal)
-    # - RSI below 35 (oversold)
-    # - Volume is surging
-    data["buy_signal"] = (
-        ((close - bb_lower) / bb_lower < 0.02) &  # within 2% of lower BB
-        (stoch_k > stoch_d) &
-        (stoch_k.shift(1) < stoch_d.shift(1)) &
-        (stoch_k < 20) &
-        (rsi < 35) &
-        (vol > 1.5 * vol_avg30)
-    )
+    # Threshold for buy signals - top (1 - score_threshold_quantile) quantile, e.g. 0.80 means top 20%
+    threshold = data["composite_score"].quantile(score_threshold_quantile)
+    data["buy_signal"] = data["composite_score"] >= threshold
 
-    # We'll generate a "raw" sell signal first, then clean it up later
+    # Keep old raw sell signal logic for sell signals
+    rsi = data["rsi"]
+    close = data["Close"]
+    ma20 = close.rolling(window=20).mean()
+
     data["raw_sell_signal"] = (
-        ((bb_upper - close) / bb_upper < 0.02) &  # near upper BB (within 2%)
-        (stoch_k < stoch_d) &
-        (stoch_k.shift(1) > stoch_d.shift(1)) &
-        (stoch_k > 80) &
-        (rsi > 65)
+        (rsi > 60) |
+        (close > ma20)
     )
 
-    # Placeholder for clean sell_signal: we’ll filter only if we’re in a trade
-    data["sell_signal"] = False  # Will update during simulation
+    data["sell_signal"] = False
 
     return data
-
 
 def simulate_trades(data: pd.DataFrame) -> pd.DataFrame:
     trades = []
     position: Optional[Dict] = None
+    entry_index = None
+
+    data["sell_signal"] = False  # Reset to ensure clean plotting
 
     for i in range(len(data)):
-        if data["buy_signal"].iloc[i] and position is None:
+        current_price = data["Close"].iloc[i]
+        current_date = data.index[i]
+
+        # BUY: Only if no position
+        if position is None and data["buy_signal"].iloc[i]:
             position = {
-                "entry_date": data.index[i],
-                "entry_price": data["Close"].iloc[i]
+                "entry_date": current_date,
+                "entry_price": current_price
             }
-        elif data["raw_sell_signal"].iloc[i] and position is not None:
-            position.update({
-                "exit_date": data.index[i],
-                "exit_price": data["Close"].iloc[i],
-                "return": (data["Close"].iloc[i] - position["entry_price"]) / position["entry_price"]
-            })
-            trades.append(position)
-            # Mark sell_signal on this day
-            data.at[data.index[i], "sell_signal"] = True
-            position = None
+            entry_index = i
+
+        # SELL: Only if holding a position
+        elif position is not None:
+            days_held = i - entry_index
+            entry_price = position["entry_price"]
+            pct_change = (current_price - entry_price) / entry_price
+
+            take_profit = pct_change >= 0.20
+            stop_loss = pct_change <= -0.10
+            time_exit = days_held >= 5
+            raw_sell = data["raw_sell_signal"].iloc[i]
+
+            if take_profit or stop_loss or time_exit or raw_sell:
+                position.update({
+                    "exit_date": current_date,
+                    "exit_price": current_price,
+                    "return": pct_change,
+                    "days_held": days_held,
+                    "exit_reason": (
+                        "Take Profit" if take_profit else
+                        "Stop Loss" if stop_loss else
+                        "Time Exit" if time_exit else
+                        "Signal Exit"
+                    )
+                })
+                trades.append(position)
+                data.at[current_date, "sell_signal"] = True
+                position = None
+                entry_index = None
 
     return pd.DataFrame(trades)
 
@@ -103,11 +129,10 @@ def simulate_trades(data: pd.DataFrame) -> pd.DataFrame:
 def plot_signals(data: pd.DataFrame):
     fig, axes = plt.subplots(4, 1, figsize=(14, 12), sharex=True, gridspec_kw={'height_ratios': [3, 1, 1, 1]})
 
-    # Price + Bollinger Bands
     ax = axes[0]
-    ax.plot(data.index, data["Close"].squeeze(), label="Close", color="blue")
-    ax.plot(data.index, data["bb_upper"].squeeze(), label="BB Upper", linestyle="--", color="gray")
-    ax.plot(data.index, data["bb_lower"].squeeze(), label="BB Lower", linestyle="--", color="gray")
+    ax.plot(data.index, data["Close"], label="Close", color="blue")
+    ax.plot(data.index, data["bb_upper"], label="BB Upper", linestyle="--", color="gray")
+    ax.plot(data.index, data["bb_lower"], label="BB Lower", linestyle="--", color="gray")
     ax.scatter(data.index[data["buy_signal"]], data["Close"][data["buy_signal"]], marker="^", color="green", label="Buy", s=100)
     ax.scatter(data.index[data["sell_signal"]], data["Close"][data["sell_signal"]], marker="v", color="red", label="Sell", s=100)
     ax.set_ylabel("Price")
@@ -115,10 +140,9 @@ def plot_signals(data: pd.DataFrame):
     ax.legend()
     ax.grid(True)
 
-    # Stochastic Oscillator
     ax = axes[1]
-    ax.plot(data.index, data["stoch_k"].squeeze(), label="%K", color="orange")
-    ax.plot(data.index, data["stoch_d"].squeeze(), label="%D", color="purple")
+    ax.plot(data.index, data["stoch_k"], label="%K", color="orange")
+    ax.plot(data.index, data["stoch_d"], label="%D", color="purple")
     ax.axhline(20, color="green", linestyle="--", linewidth=0.8, alpha=0.7)
     ax.axhline(80, color="red", linestyle="--", linewidth=0.8, alpha=0.7)
     ax.set_ylabel("Stoch")
@@ -126,18 +150,16 @@ def plot_signals(data: pd.DataFrame):
     ax.legend()
     ax.grid(True)
 
-    # Volume
     ax = axes[2]
-    ax.bar(data.index, data["Volume"].squeeze(), label="Volume", color="lightblue")
-    ax.plot(data.index, data["vol_avg30"].squeeze(), label="30-day Avg Volume", color="blue", linewidth=1.5)
+    ax.bar(data.index, data["Volume"], label="Volume", color="lightblue")
+    ax.plot(data.index, data["vol_avg30"], label="30-day Avg Volume", color="blue", linewidth=1.5)
     ax.set_ylabel("Volume")
     ax.set_title("Volume and 30-day Average")
     ax.legend()
     ax.grid(True)
 
-    # RSI
     ax = axes[3]
-    ax.plot(data.index, data["rsi"].squeeze(), label="RSI", color="darkcyan")
+    ax.plot(data.index, data["rsi"], label="RSI", color="darkcyan")
     ax.axhline(70, color="red", linestyle="--", linewidth=0.8, alpha=0.7)
     ax.axhline(30, color="green", linestyle="--", linewidth=0.8, alpha=0.7)
     ax.set_ylabel("RSI")
@@ -148,9 +170,6 @@ def plot_signals(data: pd.DataFrame):
     plt.tight_layout()
     plt.show()
 
-
-
-
 def main():
     ticker = "BITX"
     data = download_data(ticker)
@@ -158,6 +177,8 @@ def main():
     data = generate_signals(data)
     trades_df = simulate_trades(data)
 
+    print("\nTrade Log:")
+    print(trades_df[["entry_date", "exit_date", "return", "exit_reason", "days_held"]])
     print("\nAverage Return: {:.2f}%".format(trades_df["return"].mean() * 100))
 
     plot_signals(data)
