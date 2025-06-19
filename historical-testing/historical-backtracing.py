@@ -85,65 +85,70 @@ def train_model(data: pd.DataFrame):
 
     model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
     model.fit(X_train, y_train)
-    data["ml_prediction"] = model.predict(X)
+    data["ml_prediction_proba"] = model.predict_proba(data[feature_cols])[:, 1]
+    data["ml_prediction"] = (data["ml_prediction_proba"] >= 0.5).astype(int)
+
     return model, data
 
 
-def simulate_trades_from_ml(data: pd.DataFrame, stop_loss_pct=0.09, take_profit_multiple=3.0, max_hold_days=5):
+def simulate_trades_from_ml(data: pd.DataFrame, stop_loss_pct=0.10, take_profit_multiple=3.0, max_hold_days=5, prob_threshold=0.7, rsi_norm_threshold=0.5):
     trades = []
-    position = None
-    entry_index = None
+    open_trades = []
+
     data["entry"] = np.nan
     data["exit"] = np.nan
 
     for i in range(len(data)):
         current_price = data["Close"].iloc[i]
         current_date = data.index[i]
+        prob = data["ml_prediction_proba"].iloc[i]
+        rsi_norm = data["rsi_dynamic_norm"].iloc[i]  # normalized RSI between 0 and 1
 
-        if position is None and data["ml_prediction"].iloc[i] == 1:
-            if data["rsi"].iloc[i] < 40 and data["z_score"].iloc[i] < -0.5:
-                position = {
-                    "entry_date": current_date,
-                    "entry_price": current_price,
-                    "atr": data["atr"].iloc[i],
-                    "max_price": current_price
-                }
-                entry_index = i
-                data.loc[current_date, "entry"] = current_price
+        # Entry: only if prob above threshold and normalized RSI below threshold
+        if prob >= prob_threshold and rsi_norm <= rsi_norm_threshold:
+            open_trades.append({
+                "entry_date": current_date,
+                "entry_price": current_price,
+                "atr": data["atr"].iloc[i],
+                "max_price": current_price,
+                "entry_index": i
+            })
+            data.loc[current_date, "entry"] = current_price
 
-        elif position is not None:
-            entry_price = position["entry_price"]
-            atr = position["atr"]
+        trades_to_close = []
+        for idx, trade in enumerate(open_trades):
+            entry_price = trade["entry_price"]
+            atr = trade["atr"]
+            max_price = trade["max_price"]
 
-            if current_price > position["max_price"]:
-                position["max_price"] = current_price
+            if current_price > max_price:
+                open_trades[idx]["max_price"] = current_price
 
             take_profit_price = entry_price + take_profit_multiple * atr
             stop_loss_price = entry_price * (1 - stop_loss_pct)
+            days_held = (current_date - trade["entry_date"]).days
 
-            days_held = (current_date - position["entry_date"]).days
-            exit_condition = (
-                current_price >= take_profit_price or
+            if (current_price >= take_profit_price or
                 current_price <= stop_loss_price or
-                days_held >= max_hold_days
-            )
-
-            if exit_condition:
-                exit_price = current_price
-                pct_return = (exit_price - entry_price) / entry_price
+                days_held >= max_hold_days):
+                
+                pct_return = (current_price - entry_price) / entry_price
                 trades.append({
-                    "entry_date": position["entry_date"],
+                    "entry_date": trade["entry_date"],
                     "exit_date": current_date,
                     "entry_price": entry_price,
-                    "exit_price": exit_price,
+                    "exit_price": current_price,
                     "return": pct_return,
                     "days_held": days_held
                 })
-                data.loc[current_date, "exit"] = exit_price
-                position = None
-                entry_index = None
+                data.loc[current_date, "exit"] = current_price
+                trades_to_close.append(idx)
+
+        for idx in reversed(trades_to_close):
+            open_trades.pop(idx)
 
     return pd.DataFrame(trades), data
+
 
 
 def print_performance(trades_df):
@@ -158,18 +163,60 @@ def print_performance(trades_df):
     print(f"Avg Gain: {avg_gain:.2%}")
     print(f"Avg Loss: {avg_loss:.2%}")
     print(f"Expectancy per Trade: {expectancy:.2%}")
+    total_gains = trades_df.loc[trades_df["return"] > 0, "return"].sum() * 100
+    total_losses = -trades_df.loc[trades_df["return"] < 0, "return"].sum() * 100  # make losses positive
+    net_return = total_gains - total_losses
+
+    print(f"Total Gains: {total_gains:.2f}%")
+    print(f"Total Losses: {total_losses:.2f}%")
+    print(f"Net Return (Gains - Losses): {net_return:.2f}%")
 
 
-def plot_signals(data):
-    plt.figure(figsize=(14, 6))
-    plt.plot(data.index, data["Close"], label="Close Price", color="blue")
-    plt.scatter(data.index, data["entry"], label="Entry", color="green", marker="^", s=100)
-    plt.scatter(data.index, data["exit"], label="Exit", color="red", marker="v", s=100)
-    plt.title("ML Strategy Buy/Sell Points")
-    plt.xlabel("Date")
-    plt.ylabel("Price")
-    plt.legend()
-    plt.grid(True)
+def plot_signals(data: pd.DataFrame):
+    fig, axes = plt.subplots(4, 1, figsize=(14, 12), sharex=True, gridspec_kw={'height_ratios': [3, 1, 1, 1]})
+
+    # 1) Price + Bollinger Bands + Entry/Exit points
+    ax = axes[0]
+    ax.plot(data.index, data["Close"], label="Close", color="blue")
+    ax.plot(data.index, data["bb_upper"], label="BB Upper", linestyle="--", color="gray")
+    ax.plot(data.index, data["bb_lower"], label="BB Lower", linestyle="--", color="gray")
+    ax.scatter(data.index[data["entry"].notna()], data["entry"].dropna(), marker="^", color="green", label="Buy Entry", s=100)
+    ax.scatter(data.index[data["exit"].notna()], data["exit"].dropna(), marker="v", color="red", label="Sell Exit", s=100)
+    ax.set_ylabel("Price")
+    ax.set_title("Close Price and Bollinger Bands with Buy/Sell Signals")
+    ax.legend()
+    ax.grid(True)
+
+    # 2) Stochastic Oscillator
+    ax = axes[1]
+    ax.plot(data.index, data["stoch_k"], label="%K", color="orange")
+    ax.plot(data.index, data["stoch_d"], label="%D", color="purple")
+    ax.axhline(20, color="green", linestyle="--", linewidth=0.8, alpha=0.7)
+    ax.axhline(80, color="red", linestyle="--", linewidth=0.8, alpha=0.7)
+    ax.set_ylabel("Stoch")
+    ax.set_title("Stochastic Oscillator")
+    ax.legend()
+    ax.grid(True)
+
+    # 3) Volume + 30-day Average Volume
+    ax = axes[2]
+    ax.bar(data.index, data["Volume"], label="Volume", color="lightblue")
+    ax.plot(data.index, data["vol_avg30"], label="30-day Avg Volume", color="blue", linewidth=1.5)
+    ax.set_ylabel("Volume")
+    ax.set_title("Volume and 30-day Average")
+    ax.legend()
+    ax.grid(True)
+
+    # 4) RSI with threshold lines
+    ax = axes[3]
+    ax.plot(data.index, data["rsi"], label="RSI", color="darkcyan")
+    ax.axhline(70, color="red", linestyle="--", linewidth=0.8, alpha=0.7)
+    ax.axhline(30, color="green", linestyle="--", linewidth=0.8, alpha=0.7)
+    ax.set_ylabel("RSI")
+    ax.set_title("Relative Strength Index (RSI)")
+    ax.legend()
+    ax.grid(True)
+
     plt.tight_layout()
     plt.show()
 
