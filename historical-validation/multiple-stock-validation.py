@@ -8,6 +8,8 @@ import ta
 import requests
 from xgboost import XGBClassifier
 from typing import List
+from tabulate import tabulate
+
 
 # ─── USER-CONFIGURED TICKERS ─────────────────────────────────────────────────────
 training_tickers = [
@@ -215,6 +217,8 @@ def simulate_trades(
 ) -> pd.DataFrame:
     df = df.copy()
     df["proba"] = model.predict_proba(df[feature_cols])[:, 1]
+
+    
     dynamic_thresh = df["proba"].quantile(0.98)
     print(f"Dynamic threshold (top 2%): {dynamic_thresh:.4f}")
     signals = df[df["proba"] >= dynamic_thresh].index
@@ -398,10 +402,36 @@ def main():
             all_trades.append(trades)
 
     if all_trades:
-        pd.concat(all_trades).to_csv("trade_log.csv", index=False)
-        print("\n✓ Done → trade_log.csv")
+        combined = pd.concat(all_trades).reset_index(drop=True)
+        combined.to_csv("trade_log.csv", index=False)
+
+        summary = combined.groupby("ticker").agg(
+            total_trades=("return", "count"),
+            win_rate=("return", lambda x: (x >= 0).mean()),
+            net_return=("return", "sum"),
+            sharpe_ratio=("return", lambda x: np.nan if x.std() == 0 else x.mean() / x.std())
+        ).sort_values(by="net_return", ascending=False)
+
+        print("\n=== Trade Summary by Ticker ===")
+        # Format specific columns as percentages manually
+        summary_fmt = summary.copy()
+        summary_fmt["win_rate"] = summary_fmt["win_rate"].apply(lambda x: f"{x:.2%}")
+        summary_fmt["net_return"] = summary_fmt["net_return"].apply(lambda x: f"{x:.2%}")
+        summary_fmt["sharpe_ratio"] = summary_fmt["sharpe_ratio"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
+
+        print(tabulate(summary_fmt.reset_index(), headers="keys", tablefmt="pretty"))
+        total_trades = len(combined)
+        win_rate = (combined["return"] >= 0).mean()
+        net_return = combined["return"].sum()
+
+        print("\n=== FINAL RESULTS ===")
+        print(f"Total Trades: {total_trades}")
+        print(f"Final Win Rate: {win_rate:.2%}")
+        print(f"Net Return: {net_return:.2%}")
     else:
         print("\n✓ Done → no trades to log")
+
+    
 
 if __name__ == "__main__":
     main()
