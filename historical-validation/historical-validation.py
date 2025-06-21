@@ -34,7 +34,6 @@ def get_vix_data(start_date: str, end_date: str) -> pd.DataFrame:
 
     return vix
 
-
 def fetch_fear_greed_index() -> pd.DataFrame:
     url = "https://api.alternative.me/fng/?limit=365"
     response = requests.get(url)
@@ -123,7 +122,7 @@ def simulate_trades_from_ml(
     trailing_stop_pct=0.05,
     take_profit_multiple=3.0,
     base_max_hold_days=5,
-    prob_threshold=0.85,
+    prob_threshold=0.90,
     rsi_exit_threshold=75,
     cooldown_days: int = 3
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -288,7 +287,7 @@ def plot_signals(data: pd.DataFrame):
 
 def main():
     tickers = ["NVDA", "AAPL", "MSFT", "GOOGL", "META", "AMZN", "TSLA", "AMD", "NFLX", "INTC"]
-    split_date = pd.to_datetime("2024-12-31")
+    split_date = pd.to_datetime("2023-12-31")
     rolling_years = 3
 
     for ticker in tickers:
@@ -312,7 +311,7 @@ def main():
 
         train_start_date = split_date - pd.DateOffset(years=rolling_years)
         train_data = data[(data.index >= train_start_date) & (data.index <= split_date)].copy()
-        test_data = data[(data.index > pd.to_datetime("2024-12-31")) & (data.index <= pd.to_datetime("2025-12-31"))].copy()
+        test_data = data[(data.index > pd.to_datetime("2024-01-01")) & (data.index <= pd.to_datetime("2024-12-31"))].copy()
 
         print(f"Train data: {len(train_data)}, Test data: {len(test_data)}")
         feature_cols = [
