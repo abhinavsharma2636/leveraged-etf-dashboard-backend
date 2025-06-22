@@ -226,12 +226,6 @@ def simulate_trades(
     trades = []
     for entry in signals:
 
-        # Realistic confirmation: skip entry if next bar doesn’t move up
-        next_idx = df.index.get_loc(entry) + 1
-        if next_idx >= len(df):
-            continue
-        if df.iloc[next_idx]["High"] <= df.loc[entry, "Close"]:
-            continue  # skip if next candle doesn't confirm upward move
         entry_price = df.at[entry, "Close"]
         highest = entry_price
         prev_vol = df.at[entry, "Volume"]
@@ -403,7 +397,6 @@ def main():
 
     if all_trades:
         combined = pd.concat(all_trades).reset_index(drop=True)
-        combined.to_csv("trade_log.csv", index=False)
 
         summary = combined.groupby("ticker").agg(
             total_trades=("return", "count"),
