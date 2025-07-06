@@ -1,0 +1,53 @@
+# === Python Cache and Bytecode ===
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# === Jupyter Notebook Checkpoints ===
+.ipynb_checkpoints/
+
+# === Virtual Environments ===
+venv/
+env/
+.venv/
+
+# === IDEs and Editors ===
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# === OS-specific ===
+.DS_Store
+Thumbs.db
+
+# === Logs and Output ===
+*.log
+
+# === Data Files ===
+*.csv
+*.parquet
+*.h5
+*.pkl
+*.joblib
+*.npy
+*.npz
+
+# If you want to ignore all trade logs but keep one example:
+# trade_log*.csv
+# !example_trade_log.csv
+
+# === Model Files ===
+*.model
+*.sav
+
+# === Env Files ===
+.env
+*.env
+
+# === Temporary Files ===
+*.tmp
+*.bak
+*.swp

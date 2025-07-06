@@ -5,8 +5,12 @@ import ta
 
 # Load trade log
 df = pd.read_csv("trade_log.csv", parse_dates=["entry_date", "exit_date"])
-ticker = "AMZN"
+ticker = "SPY"
 sub = df[df["ticker"] == ticker].copy()
+
+
+if ticker not in df["ticker"].unique():
+    raise ValueError(f"Ticker '{ticker}' not found in trade_log.csv.")
 
 # Download and clean price data with indicators
 def get_price_data_with_indicators(ticker: str, start: str, end: str) -> pd.DataFrame:
@@ -63,7 +67,11 @@ for i, row in sub.iterrows():
     exit_  = price_data.index[price_data.index.get_indexer([row["exit_date"]], method="ffill")[0]]
     entry_px = price_data.loc[entry, "Close"]
     exit_px  = price_data.loc[exit_, "Close"]
+        # Entry marker
     axs[0].scatter(entry, entry_px, color="green", marker="^", s=100, label="Entry" if i == 0 else "")
+    # Exit marker
+    axs[0].scatter(exit_, exit_px, color="red", marker="v", s=100, label="Exit" if i == 0 else "")
+
 
 axs[0].set_title(f"{ticker} Price with Trades and Bollinger Bands")
 axs[0].set_ylabel("Price")

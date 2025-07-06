@@ -1,12 +1,26 @@
 # leveraged-etf-dashboard-backend
-USAGE FOR MULTIPLE STOCK VALIDATION:
+
+Navigate to /historical-validation
+
+Run these commands:
+    python3 -m venv venv
+    source venv/bin/activate
+    pip install -r requirements.txt
+
+USAGE FOR MAIN.PY:
+
+python3 main.py --test_year 2025 --test_tickers SPY
+
+--test_year -> any valid year
+
+--test_tickers -> Any Valid Tickers accesible by Yahoo Finance
 
 
-python3 multiple-stock-validation.py --test_year 2022 \
---test_tickers AAPL MSFT GOOGL AMZN META NVDA BRK-B JPM V MA \
-TSLA UNH HD PG LLY JNJ XOM CVX MRK PEP COST \
---profit_target 0.20 --stop_loss 0.08 \
---max_duration 60 --min_hold_days 20
+USAGE FOR DATASIM.PY: You must change ticker variable to desiered ticker to see graph of plotted buys and sells
+
+python3 datasim.py 
 
 
-Change tickers, profit target, stoploss duration and min hold days to desired values
+
+
+
