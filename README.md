@@ -13,7 +13,7 @@ python3 main.py --test_year 2025 --test_tickers SPY
 
 --test_year -> any valid year
 
---test_tickers -> Any Valid Tickers accesible by Yahoo Finance
+--test_tickers -> Any Valid Tickers accesible by Yahoo Finance (Space Seperated Ex: AAPL NVDA etc..)
 
 
 USAGE FOR DATASIM.PY: You must change ticker variable to desiered ticker to see graph of plotted buys and sells
