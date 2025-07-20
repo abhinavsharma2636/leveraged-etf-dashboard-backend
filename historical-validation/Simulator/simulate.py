@@ -1,5 +1,5 @@
 import pandas as pd
-from .simulate_helpers import passes_entry_filters, check_exit_condition 
+from .simulate_helpers import check_exit_today, passes_entry_filters, check_exit_condition 
 
 class TradeSimulator:
     def __init__(self, feat_cols, models):
@@ -84,3 +84,133 @@ class TradeSimulator:
             i = exit_idx + 1
 
         return pd.DataFrame(results)
+
+
+    # @staticmethod
+    # def simulate_one_day(day, daily_data, feat_cols, models, open_positions, results, core_trade_state):
+    #     for ticker, row in daily_data.items():
+    #         # if ticker not in core_trade_state:
+    #         #     continue
+
+    #         # 🔓 Disable core trade locking so we log every possible trade
+    #         # Skip NaN inputs
+    #         if row[feat_cols].isnull().any():
+    #             print(f"[⚠️] {ticker} has missing values — skipping")
+    #             continue
+
+    #         vix = row["vix_close"]
+    #         regime = "high" if vix > 30 else "caution" if vix > 20 else "low"
+    #         model = models[regime]
+
+    #         if not passes_entry_filters(row, regime):
+    #             continue
+
+    #         x = row[feat_cols].values.reshape(1, -1)
+    #         proba = model.predict_proba(x)[0, 1]
+
+    #         # ✅ Print all regime+proba signals
+    #         print(f"📈 {day.date()} | {ticker} | Proba: {proba:.3f} | Regime: {regime}")
+
+    #         threshold = {"low": 0.7, "caution": 0.6, "high": 0.55}[regime]
+    #         if proba < threshold:
+    #             continue
+
+    #         # 🟢 Log raw buy indication only (do not lock)
+    #         results.append({
+    #             "ticker": ticker,
+    #             "entry_date": day,
+    #             "entry_price": row["Close"],
+    #             "entry_regime": regime,
+    #             "proba": proba
+    #         })
+
+    #         # Optional: suppress this line if you want to allow repeated buys
+    #         # core_trade_state[ticker] = day
+
+    @staticmethod
+    def simulate_one_day(day, daily_data, feat_cols, models, open_positions, results, core_trade_state):
+        for ticker, row in daily_data.items():
+            # Check existing position for exit
+            vix = row["vix_close"]
+            volatility_regime = "high" if vix > 30 else "caution" if vix > 20 else "low"
+
+            if ticker in open_positions:
+                trade = open_positions[ticker]
+                trade["day_count"] += 1
+
+                # ✅ Update max_close for trailing stop logic
+                trade["entry_features"]["max_close"] = max(
+                    trade["entry_features"]["max_close"],
+                    row["Close"]
+                )
+
+                exit_reason = check_exit_today(
+                    row,
+                    trade["entry_features"],
+                    trade["day_count"],
+                    trade["entry_price"],
+                    volatility_regime
+                )
+                if exit_reason:
+                    trade["exit_date"] = day
+                    trade["exit_price"] = row["Close"]
+                    trade["exit_reason"] = exit_reason
+                    results.append(trade)
+                    del open_positions[ticker]
+                continue  # Skip new entries for this ticker while open
+
+            # Check for NaNs
+            if row[feat_cols].isnull().any():
+                print(f"[⚠️] {ticker} has missing values — skipping")
+                continue
+
+            # Regime + model selection
+            vix = row["vix_close"]
+            regime = "high" if vix > 30 else "caution" if vix > 20 else "low"
+            model = models[regime]
+
+            # Entry filters
+            if not passes_entry_filters(row, regime):
+                continue
+
+            # Base model prediction
+            x = row[feat_cols].values.reshape(1, -1)
+            proba = model.predict_proba(x)[0, 1]
+            print(f"📈 {day.date()} | {ticker} | Proba: {proba:.3f} | Regime: {regime}")
+
+            # Threshold check
+            threshold = {"low": 0.6, "caution": 0.5, "high": 0.30}[regime]
+            if proba < threshold:
+                continue
+
+            # Collect entry features
+            entry_row_slim = {
+                "rsi": row["rsi"],
+                "macd_diff": row["macd_diff"],
+                "bb_pct": row["bb_pct"],
+                "ema50_slope": row["ema50_slope"],
+                "price_vs_ema200": row["price_vs_ema200"],
+                "vix_close": row["vix_close"],
+                "fear_greed": row["fear_greed"],
+                "volume_surge": row["volume_surge"],
+                "macro_trend_ok": row.get("macro_trend_ok", None),
+                "volatility_regime": regime,
+                "max_close": row["Close"]  # ✅ For trailing stop tracking
+            }
+
+            # Log new open position
+            open_positions[ticker] = {
+                "ticker": ticker,
+                "entry_date": day,
+                "entry_price": row["Close"],
+                "entry_regime": regime,
+                "entry_features": entry_row_slim,
+                "proba": proba,
+                "day_count": 0
+            }
+
+
+
+
+
+

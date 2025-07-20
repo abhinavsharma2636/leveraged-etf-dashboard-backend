@@ -9,6 +9,13 @@ class ModelTrainer:
     def train(self, df: pd.DataFrame) -> XGBClassifier:
         X = df[self.feature_cols]
         y = df["target"]
+
+        pos = (y == 1).sum()
+        neg = (y == 0).sum()
+        scale_pos_weight = neg / max(pos, 1)
+
+        print("[📊] Training class balance:", y.value_counts(normalize=True).to_dict())
+
         model = XGBClassifier(
             objective="binary:logistic",
             base_score=0.5,
@@ -16,7 +23,9 @@ class ModelTrainer:
             max_depth=4,
             learning_rate=0.1,
             eval_metric="logloss",
+            scale_pos_weight=scale_pos_weight,
             random_state=42
         )
         model.fit(X, y)
         return model
+
