@@ -128,43 +128,44 @@ class TradeSimulator:
     #         # core_trade_state[ticker] = day
 
     @staticmethod
-    def simulate_one_day(day, daily_data, feat_cols, models, open_positions, results, core_trade_state):
+    def simulate_one_day(day, daily_data, feat_cols, models, open_positions, results, core_trade_state, meta_model=None):
         for ticker, row in daily_data.items():
-            # Check existing position for exit
-            vix = row["vix_close"]
-            volatility_regime = "high" if vix > 30 else "caution" if vix > 20 else "low"
-
+            # Check existing position
             if ticker in open_positions:
                 trade = open_positions[ticker]
                 trade["day_count"] += 1
 
-                # ✅ Update max_close for trailing stop logic
+                # Update trailing stop
                 trade["entry_features"]["max_close"] = max(
                     trade["entry_features"]["max_close"],
                     row["Close"]
                 )
+
+                vix = row["vix_close"]
+                regime = "high" if vix > 30 else "caution" if vix > 20 else "low"
 
                 exit_reason = check_exit_today(
                     row,
                     trade["entry_features"],
                     trade["day_count"],
                     trade["entry_price"],
-                    volatility_regime
+                    regime
                 )
                 if exit_reason:
                     trade["exit_date"] = day
                     trade["exit_price"] = row["Close"]
                     trade["exit_reason"] = exit_reason
+                    trade["final_return"] = (row["Close"] - trade["entry_price"]) / trade["entry_price"]  # ✅ add return here too
                     results.append(trade)
                     del open_positions[ticker]
-                continue  # Skip new entries for this ticker while open
+                continue
 
-            # Check for NaNs
+            # Check for missing features
             if row[feat_cols].isnull().any():
                 print(f"[⚠️] {ticker} has missing values — skipping")
                 continue
 
-            # Regime + model selection
+            # Model & regime
             vix = row["vix_close"]
             regime = "high" if vix > 30 else "caution" if vix > 20 else "low"
             model = models[regime]
@@ -173,17 +174,41 @@ class TradeSimulator:
             if not passes_entry_filters(row, regime):
                 continue
 
-            # Base model prediction
             x = row[feat_cols].values.reshape(1, -1)
             proba = model.predict_proba(x)[0, 1]
             print(f"📈 {day.date()} | {ticker} | Proba: {proba:.3f} | Regime: {regime}")
 
-            # Threshold check
             threshold = {"low": 0.6, "caution": 0.5, "high": 0.30}[regime]
             if proba < threshold:
                 continue
 
-            # Collect entry features
+            # ✅ Meta model check (if provided)
+            if meta_model is not None:
+                meta_features = {
+                    "proba": proba,
+                    "core_proba_squared": proba ** 2,
+                    "core_proba_high": int(proba > 0.7),
+                    "core_proba_superhigh": int(proba > 0.85),
+                    "rsi": row["rsi"],
+                    "macd_diff": row["macd_diff"],
+                    "price_vs_ema50": row["price_vs_ema50"],
+                    "volume_surge": row["volume_surge"],
+                    "stoch_d": row["stoch_d"],
+                    "atr": row["atr"],
+                    "volatility_regime_low": int(regime == "low"),
+                    "volatility_regime_neutral": int(regime == "neutral"),
+                    "volatility_regime_high": int(regime == "high"),
+                }
+
+                x_meta = pd.DataFrame([meta_features])
+                meta_proba = meta_model.predict_proba(x_meta)[0, 1]
+                print(f"Meta Proba: {meta_proba:.3f} | Core Proba: {proba:.3f} | Ticker: {ticker} | Regime: {regime}")
+
+                if meta_proba < 0.4 and proba <= 0.70:
+                    continue
+
+
+            # ✅ Entry accepted
             entry_row_slim = {
                 "rsi": row["rsi"],
                 "macd_diff": row["macd_diff"],
@@ -195,10 +220,9 @@ class TradeSimulator:
                 "volume_surge": row["volume_surge"],
                 "macro_trend_ok": row.get("macro_trend_ok", None),
                 "volatility_regime": regime,
-                "max_close": row["Close"]  # ✅ For trailing stop tracking
+                "max_close": row["Close"]
             }
 
-            # Log new open position
             open_positions[ticker] = {
                 "ticker": ticker,
                 "entry_date": day,
@@ -206,8 +230,116 @@ class TradeSimulator:
                 "entry_regime": regime,
                 "entry_features": entry_row_slim,
                 "proba": proba,
+                "meta_proba": meta_proba,
                 "day_count": 0
             }
+
+        # ✅ After all processing, update last_seen_price
+        for trade in open_positions.values():
+            ticker = trade["ticker"]
+            if ticker in daily_data:
+                trade["last_seen_price"] = daily_data[ticker]["Close"]
+
+
+
+
+    @staticmethod
+    def simulate_one_day_meta(day, daily_data, feat_cols, models, active_trades, results):
+        # === 1. Check exits for all active trades ===
+        still_open = []
+
+        for trade in active_trades:
+            ticker = trade["ticker"]
+            if ticker not in daily_data:
+                still_open.append(trade)
+                continue
+
+            row = daily_data[ticker]
+            trade["day_count"] += 1
+            trade["entry_features"]["max_close"] = max(
+                trade["entry_features"]["max_close"],
+                row["Close"]
+            )
+
+            vix = row["vix_close"]
+            regime = "high" if vix > 30 else "caution" if vix > 20 else "low"
+
+            exit_reason = check_exit_today(
+                row,
+                trade["entry_features"],
+                trade["day_count"],
+                trade["entry_price"],
+                regime
+            )
+
+            if exit_reason:
+                trade["exit_date"] = day
+                trade["exit_price"] = row["Close"]
+                trade["exit_reason"] = exit_reason
+                trade["final_return"] = (trade["exit_price"] - trade["entry_price"]) / trade["entry_price"]
+
+                # ✅ Apply your meta labeling rule
+                if trade["final_return"] > 0.20 and exit_reason not in ["exit_emergency_stop", "exit_failed_reversal"]:
+                    trade["meta_label"] = 1
+                else:
+                    trade["meta_label"] = 0
+
+                results.append(trade)
+            else:
+                still_open.append(trade)
+
+        active_trades[:] = still_open  # update in-place
+
+        # === 2. Evaluate new entries ===
+        for ticker, row in daily_data.items():
+            if row[feat_cols].isnull().any():
+                continue
+
+            vix = row["vix_close"]
+            regime = "high" if vix > 30 else "caution" if vix > 20 else "low"
+            model = models[regime]
+
+            if not passes_entry_filters(row, regime):
+                continue
+
+            x = row[feat_cols].values.reshape(1, -1)
+            proba = model.predict_proba(x)[0, 1]
+            threshold = {"low": 0.6, "caution": 0.5, "high": 0.30}[regime]
+
+            if proba < threshold:
+                continue
+
+            # ✅ Create meta features (clean + consistent with META_FEATURE_COLS)
+            meta_features = {
+                "proba": proba,
+                "core_proba_squared": proba ** 2,
+                "core_proba_high": int(proba > 0.7),
+                "core_proba_superhigh": int(proba > 0.85),
+                "rsi": row["rsi"],
+                "macd_diff": row["macd_diff"],
+                "price_vs_ema50": row["price_vs_ema50"],
+                "volume_surge": row["volume_surge"],
+                "stoch_d": row["stoch_d"],
+                "atr": row["atr"],
+                "volatility_regime_low": int(regime == "low"),
+                "volatility_regime_neutral": int(regime == "neutral"),
+                "volatility_regime_high": int(regime == "high"),
+            }
+
+            active_trades.append({
+                "ticker": ticker,
+                "entry_date": day,
+                "entry_price": row["Close"],
+                "entry_regime": regime,
+                "features": meta_features,
+                "entry_features": {
+                    "max_close": row["Close"]  # ✅ Needed for exit check
+                },
+                "proba": proba,
+                "day_count": 0
+            })
+
+
 
 
 

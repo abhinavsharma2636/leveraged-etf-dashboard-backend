@@ -5,7 +5,7 @@ import ta
 
 # Load trade log
 df = pd.read_csv("trade_log.csv", parse_dates=["entry_date", "exit_date"])
-ticker = "ROKU"
+ticker = "NVDA"
 sub = df[df["ticker"] == ticker].copy()
 
 if ticker not in df["ticker"].unique():

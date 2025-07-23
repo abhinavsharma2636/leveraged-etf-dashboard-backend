@@ -71,6 +71,7 @@ from collections import deque
 def main():
     args = parse_args()
     start_year = args.test_year
+
     start_date = datetime.date(start_year, 1, 1)             # when simulation starts
     today = datetime.date.today()
     end_month = datetime.date(today.year, today.month, 1)    # simulation end (rounded to month start)
@@ -83,6 +84,23 @@ def main():
         "price_vs_ema50", "stoch_d",
         "volatility_regime_low", "volatility_regime_neutral", "volatility_regime_high"
     ]
+
+    META_FEATURE_COLS = [
+    "proba",
+    "core_proba_squared",
+    "core_proba_high",
+    "core_proba_superhigh",
+    "rsi",
+    "macd_diff",
+    "price_vs_ema50",
+    "volume_surge",
+    "stoch_d",
+    "atr",
+    "volatility_regime_low",
+    "volatility_regime_neutral",
+    "volatility_regime_high"
+]
+
 
     dm = DataManager(data_start_date, data_end_date)
     dm.download_all_macro()
@@ -201,7 +219,137 @@ def main():
         "high": dip_model
     }
 
+    # ─── META Live Simulation ─────────────────────────────────────
+
+    meta_start = datetime.date(start_year - 10, 1, 1)
+    meta_months = pd.date_range(start=meta_start, end=start_date - pd.offsets.MonthBegin(1), freq="MS")
+    meta_end_month = datetime.date(start_year, 1, 1)
+
+    # ─── Preload all features for meta simulation tickers ─────────────────────────────
+    print("Preloading feature data for meta training tickers...")
+
+    meta_ticker_feats = {}
+    for t in meta_training_tickers:
+        raw = dm.download_stock_data(t)
+        feats = dm.compute_features(raw)
+
+        # Add derived columns once (not per day)
+        feats["ema50_slope"] = feats["ema50"].diff(3)
+        feats["vix_5d_slope"] = feats["vix_close"].diff(5)
+        feats["fear_greed_slope"] = feats["fear_greed"].diff(5)
+        feats["macro_trend_ok"] = (
+            (feats["price_vs_ema200"] > 0.01) &
+            (feats["rsi"] > 50) &
+            (feats["vix_5d_slope"] < 0)
+        )
+
+        meta_ticker_feats[t] = feats
+
+    # ─── Run Meta Simulation Month by Month ──────────────────────────────────────
+    current_month = meta_start
+    meta_results = []
+    active_trades = []
+
+    while current_month <= meta_end_month:
+        print(f"\n=== META SIMULATING {current_month.strftime('%Y-%m')} ===")
+
+        month_start = current_month
+        month_end = (current_month + relativedelta(months=1)) - datetime.timedelta(days=1)
+        date_range = pd.date_range(month_start, month_end, freq="B")
+
+        for current_day in date_range:
+            daily_data = {}
+
+            for t in meta_training_tickers:
+                feats = meta_ticker_feats[t]
+
+                if current_day not in feats.index:
+                    continue
+
+                row = feats.loc[current_day]
+                daily_data[t] = row
+
+            # ✅ Run meta simulation logic (multi-trade, labeled exits)
+            TradeSimulator.simulate_one_day_meta(
+                current_day,
+                daily_data,
+                feat_cols,
+                current_models,
+                active_trades,
+                meta_results
+            )
+
+        current_month += relativedelta(months=1)
+
+    # ✅ Finalize any still-open trades
+    for trade in active_trades:
+        trade["exit_date"] = meta_end_month
+        trade["exit_price"] = trade.get("last_seen_price", trade["entry_price"])
+        trade["exit_reason"] = "forced_timeout"
+        trade["final_return"] = (trade["exit_price"] - trade["entry_price"]) / trade["entry_price"]
+        trade["meta_label"] = 1 if trade["final_return"] > 0.20 else 0
+        meta_results.append(trade)
+
+    meta_df = pd.DataFrame(meta_results)
+    print(meta_df["meta_label"].value_counts(normalize=True))
+    print("\n📊 Meta Label Counts (absolute):")
+    print(meta_df["meta_label"].value_counts())
+
+    print("\n📊 Meta Label Distribution (%):")
+    print(meta_df["meta_label"].value_counts(normalize=True).rename("percentage"))
+
+    print("\n💰 Final Return Stats by Meta Label:")
+    print(meta_df.groupby("meta_label")["final_return"].describe())
+
+    print("\n📈 Core Model Proba by Meta Label:")
+    print(meta_df.groupby("meta_label")["proba"].describe())
+
+    print("\n🌐 Entry Regimes by Meta Label:")
+    print(meta_df.groupby("meta_label")["entry_regime"].value_counts())
+
+   # Flatten features
+    features_df = pd.json_normalize(meta_df["features"])
+
+    # Make sure only expected columns are used
+    features_df = features_df[META_FEATURE_COLS]
+
+    # Combine with labels
+    meta_data = pd.concat([features_df, meta_df["meta_label"]], axis=1)
+
+    # Train meta model with explicit feature cols
+    meta_trainer = ModelTrainer(feature_cols=META_FEATURE_COLS)
+    meta_model = meta_trainer.train_meta(meta_data)
+
+    import matplotlib.pyplot as plt
+
+    importances = meta_model.feature_importances_
+    # pd.Series(importances, index=META_FEATURE_COLS).sort_values().plot.barh(figsize=(8, 6), title="Meta Model Feature Importances")
+    # plt.tight_layout()
+    # plt.show()
+
+
+
     # ─── Monthly Live Simulation ─────────────────────────────────────
+    print("Preloading feature data for simulation tickers...")
+
+    sim_ticker_feats = {}
+    for t in args.test_tickers:
+        raw = dm.download_stock_data(t)
+        feats = dm.compute_features(raw)
+
+        # Add derived columns once (not per day)
+        feats["ema50_slope"] = feats["ema50"].diff(3)
+        feats["vix_5d_slope"] = feats["vix_close"].diff(5)
+        feats["fear_greed_slope"] = feats["fear_greed"].diff(5)
+        feats["macro_trend_ok"] = (
+            (feats["price_vs_ema200"] > 0.01) &
+            (feats["rsi"] > 50) &
+            (feats["vix_5d_slope"] < 0)
+        )
+
+        sim_ticker_feats[t] = feats
+
+    # ─── Run Live Simulation Month by Month ──────────────────────────────────────
     current_month = start_date
     all_results = []
     open_positions = {}
@@ -218,17 +366,7 @@ def main():
             daily_data = {}
 
             for t in args.test_tickers:
-                raw = dm.download_stock_data(t)
-                feats = dm.compute_features(raw)
-
-                feats["ema50_slope"] = feats["ema50"].diff(3)
-                feats["vix_5d_slope"] = feats["vix_close"].diff(5)
-                feats["fear_greed_slope"] = feats["fear_greed"].diff(5)
-                feats["macro_trend_ok"] = (
-                    (feats["price_vs_ema200"] > 0.01) &
-                    (feats["rsi"] > 50) &
-                    (feats["vix_5d_slope"] < 0)
-                )
+                feats = sim_ticker_feats[t]
 
                 if current_day not in feats.index:
                     continue
@@ -238,24 +376,34 @@ def main():
 
             # Run full trade simulation with entry + exit logic
             TradeSimulator.simulate_one_day(
-                current_day,
-                daily_data,
-                feat_cols,
-                current_models,
-                open_positions=open_positions,     # ✅ persistent positions
-                results=all_results,               # ✅ completed trades
-                core_trade_state=core_trade_state
-            )
+            current_day,
+            daily_data,
+            feat_cols,
+            current_models,
+            open_positions=open_positions,
+            results=all_results,
+            core_trade_state=core_trade_state,
+            meta_model=meta_model  # 👈 NEW
+        )
+
 
         current_month += relativedelta(months=1)
 
-    # ─── Finalize any open positions at the end of simulation ───
+# ─── Finalize any open positions at the end of simulation ────────────────────
     final_day = end_month
+
     for ticker, trade in open_positions.items():
-        trade["exit_date"] = final_day
         last_price = trade.get("last_seen_price", trade["entry_price"])
+
+        # Compute return
+        final_return = (last_price - trade["entry_price"]) / trade["entry_price"]
+
+        # Update trade info
+        trade["exit_date"] = final_day
         trade["exit_price"] = last_price
         trade["exit_reason"] = "forced_timeout"
+        trade["final_return"] = final_return
+
         all_results.append(trade)
 
 
